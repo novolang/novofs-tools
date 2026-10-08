@@ -1,0 +1,16 @@
+# Build outputs.
+_novo/
+
+# The generated API page.  `novo doc` writes it here; the registry gets
+# its own copy, uploaded beside the archive by `novo pkg publish`.
+APIDOC.md
+
+# The image tool `novo pkg build` writes, named after the package.
+novofs-tools
+
+# Volume images a test or a run of the tool writes.
+*.img
+*.bin
+
+# NOT novo.lock: a locked build resolves the same closure twice, and a
+# consumer never reads a dependency's lock.

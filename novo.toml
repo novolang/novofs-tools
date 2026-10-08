@@ -1,0 +1,24 @@
+[package]
+name        = "novofs-tools"
+version     = "0.1.0"
+description = "The host's tools for novofs volumes: an image tool that builds, lists, reads, checks and unpacks volume images (mk, ls, cat, fsck, df, extract), a RAM flash device with power-cut injection for testing, an image-file device, an adapter from embedded-hal-nv's BlockDevice, and whole files and listings over any novofs FileSystem."
+license     = "Apache-2.0"
+category    = "embedded"
+layer       = "app"
+stability   = "experimental"
+tags        = ["embedded", "filesystem", "flash", "littlefs", "image", "testing"]
+repository  = "https://github.com/novolang/novofs-tools"
+maintainers = ["novo-lang"]
+main        = "src/main.nv"
+# The toolchain floor is novofs 0.3.0's: its volume implements
+# `FileSystem[mutate, e]`, which 0.20.1 first accepts.
+novo        = ">= 0.20.1"
+
+[dependencies]
+# The filesystem the tools build, read and test.
+novofs = "^0.3.0"
+# CRC-32C, for the superblock probe of an image whose geometry is not
+# given.
+crc-nv = "^0.1.6"
+# The BlockDevice trait, for the whole-block adapter.
+embedded-hal-nv = "^0.3.2"

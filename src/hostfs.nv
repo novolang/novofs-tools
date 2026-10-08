@@ -1,0 +1,127 @@
+// src/hostfs.nv — the host's view of a filesystem: whole files as
+// `Bytes`, directories as lists.
+//
+// novofs writes a file from a `ByteSrc` and reads one a buffer of at
+// most 512 bytes at a time, so that it runs in fixed memory on a board.
+// A host program wants a whole file and a whole listing, and these
+// functions give it that over any `FileSystem`: a novofs volume on a
+// RamFlash or an image file, or another filesystem that implements the
+// trait.  The image tool and the test suites use them.
+
+use std.bytes
+use std.list
+
+use nvfs
+
+// A `Bytes` as the bytes a file write takes.  `src` makes one.
+pub struct BytesSrc
+    b: Bytes
+
+impl ByteSrc for BytesSrc
+    fn src_len(self) -> Int
+        bytes.len(self.b)
+
+    fn src_at(self, i: Int) -> Int
+        bytes.byte_at(self.b, i) ?? 0
+
+// `b` as a source of bytes, for `file_write` and `file_append`.
+//
+// ```novo
+// use std.bytes
+//
+// println("${hostfs.src(bytes.from_str("hello")).src_len()}")   // 5
+// ```
+pub fn src(b: Bytes) -> BytesSrc
+    BytesSrc { b: b }
+
+// One entry of a directory, as a host program holds it: its name as a
+// string, whether it is a directory, and its size in bytes.
+pub struct DirEntry
+    name: Str
+    is_dir: Bool
+    size: Int
+
+// The answer of `dir_list`: the entries, or why the directory cannot be
+// listed.
+pub enum DirListRes
+    DLOk(entries: [DirEntry])
+    DLErr(e: FsError)
+
+// The answer of `file_read` and `file_read_at`: the bytes, or why they
+// cannot be read.
+pub enum FileRes
+    FOk(data: Bytes)
+    FErr(e: FsError)
+
+// The entries of the directory `path`, in the order the directory holds
+// them, or why it cannot be listed.
+pub fn dir_list<F: FileSystem[e]>(fsys: F, path: Str) -> DirListRes [e]
+    var at = fsys.list(path)
+    if at.err != EOk
+        return DLErr(at.err)
+    var es: [DirEntry] = []
+    while true
+        match fsys.list_next(at)
+            Some(en) =>
+                es = list.push(es, DirEntry { name: en.name_str(), is_dir: en.is_dir,
+                                              size: en.size })
+            None     =>
+                break
+    DLOk(es)
+
+// `len` bytes of the file `path` from `off`.  A range past the end of
+// the file answers EInvalidConfig, and a directory EIsDir.
+pub fn file_read_at<F: FileSystem[e]>(fsys: F, path: Str, off: Int, len: Int) -> FileRes [e]
+    match fsys.stat(path)
+        EntErr(err) => FErr(err)
+        EntOk(en)   =>
+            if en.is_dir
+                return FErr(EIsDir)
+            if off < 0 or len < 0 or off + len > en.size
+                return FErr(EInvalidConfig)
+            var out = bytes.zeros(len)
+            var buf: Buf = Vec.new()
+            for chunk in 0..(len + BUF_CAP - 1) / BUF_CAP
+                let at = chunk * BUF_CAP
+                var n = len - at
+                if n > BUF_CAP
+                    n = BUF_CAP
+                let r = fsys.file_read_at(path, off + at, n, buf)
+                if r != EOk
+                    return FErr(r)
+                for k in 0..n
+                    out = bytes.set_u8(out, at + k, buf[k] as Int)
+            FOk(out)
+
+// The whole content of the file `path`, or why it cannot be read.
+pub fn file_read<F: FileSystem[e]>(fsys: F, path: Str) -> FileRes [e]
+    match fsys.stat(path)
+        EntErr(err) => FErr(err)
+        EntOk(en)   => file_read_at(fsys, path, 0, en.size)
+
+// Creates or replaces the file `path` with `data`.
+pub fn file_write<F: FileSystem[e]>(fsys: F, path: Str, data: Bytes) -> FsError [e]
+    fsys.file_write(path, src(data))
+
+// Appends `data` to the file `path`; a missing file is created.
+pub fn file_append<F: FileSystem[e]>(fsys: F, path: Str, data: Bytes) -> FsError [e]
+    fsys.file_append(path, src(data))
+
+// Programs `data` at (block, off) of any device, for a test that writes
+// a device directly.
+pub fn prog_bytes<D: Flash[e]>(dev: D, block: Int, off: Int, data: Bytes) -> Bool [e]
+    var buf: Buf = Vec.new()
+    for i in 0..bytes.len(data)
+        let _ = buf.push((bytes.byte_at(data, i) ?? 0) as u8)
+    dev.prog(block, off, buf)
+
+// The `len` bytes at (block, off) of any device, or None when the device
+// refuses the read.
+pub fn read_bytes<D: Flash[e]>(dev: D, block: Int, off: Int, len: Int) -> ?Bytes [e]
+    var buf: Buf = Vec.new()
+    if not dev.read(block, off, len, buf)
+        return None
+    var out = bytes.zeros(buf.len())
+    for i in 0..buf.len()
+        out = bytes.set_u8(out, i, buf[i] as Int)
+    Some(out)

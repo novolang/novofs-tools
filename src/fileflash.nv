@@ -1,0 +1,108 @@
+// src/fileflash.nv — a volume image in a file on the host, as a flash
+// device.
+//
+// FileFlash implements novofs's `Flash` trait over a file: block `b`
+// is the `block_size` bytes at `b * block_size`.  It programs and
+// erases plainly, with no NOR checks, because an image is built by the
+// image tool and read back, not worn.  A fresh file, or one shorter
+// than the geometry, is erased to 0xFF over the whole geometry when the
+// device is made.
+//
+// The file is opened twice: a write descriptor, which cannot be read
+// through, and a read descriptor.  Both are positional, so the two never
+// share a file offset.
+
+use std.bytes
+use std.fs
+use std.list
+
+use nvfs
+
+// A volume image in a file: `bc` blocks of `bs` bytes, read in units of
+// `rs` bytes and programmed in pages of `ps`, through the file's read
+// and write descriptors.  `file_flash` makes one.
+pub struct FileFlash
+    rfd: Int
+    wfd: Int
+    rs: Int
+    ps: Int
+    bs: Int
+    bc: Int
+
+// The image file `img_path` as a device of `block_count` blocks of
+// `block_size` bytes, read in units of `read_size` and programmed in
+// pages of `prog_size`.  A file shorter than the geometry is erased to
+// 0xFF first.  None when the file cannot be opened or erased.
+pub fn file_flash(img_path: Str, read_size: Int, prog_size: Int, block_size: Int,
+                  block_count: Int) -> ?FileFlash [fs]
+    let wfd = fs.open_write(img_path)!
+    let rfd = fs.open_read(img_path)!
+    let dev = FileFlash { rfd: rfd, wfd: wfd, rs: read_size, ps: prog_size,
+                          bs: block_size, bc: block_count }
+    match fs.read_at(rfd, block_size * block_count - 1, 1)
+        Some(x) => Some(dev)
+        None    =>
+            var ok = true
+            for b in 0..block_count
+                if not dev.erase(b)
+                    ok = false
+            if ok
+                Some(dev)
+            else
+                None
+
+impl Flash[fs] for FileFlash
+    fn read_size(self) -> Int
+        self.rs
+
+    fn prog_size(self) -> Int
+        self.ps
+
+    fn block_size(self) -> Int
+        self.bs
+
+    fn block_count(self) -> Int
+        self.bc
+
+    fn read(self, block: Int, off: Int, len: Int, var dst: Buf) -> Bool [fs]
+        dst.clear()
+        if block < 0 or block >= self.bc or off < 0 or len < 0 or len > BUF_CAP
+            false
+        else if off + len > self.bs or off % self.rs != 0 or len % self.rs != 0
+            false
+        else
+            // fs.read_at answers all `len` bytes or None: a read that
+            // reaches past the end of the file is None, never short.
+            match fs.read_at(self.rfd, block * self.bs + off, len)
+                Some(got) =>
+                    for v in got
+                        let _ = dst.push((v & 255) as u8)
+                    true
+                None      => false
+
+    fn prog(self, block: Int, off: Int, var data: Buf) -> Bool [fs]
+        let len = data.len()
+        if block < 0 or block >= self.bc or off < 0
+            false
+        else if off + len > self.bs or off % self.ps != 0 or len % self.ps != 0
+            false
+        else
+            var img = bytes.zeros(len)
+            for i in 0..len
+                img = bytes.set_u8(img, i, data[i] as Int)
+            let out = list.map(bytes.to_byte_list(img), b => b as Int)
+            // fs.write_at answers None on success and Some(err) otherwise.
+            match fs.write_at(self.wfd, block * self.bs + off, out)
+                None    => true
+                Some(e) => false
+
+    fn erase(self, block: Int) -> Bool [fs]
+        if block < 0 or block >= self.bc
+            false
+        else
+            match fs.write_at(self.wfd, block * self.bs, list.map(list.range(0, self.bs), i => 255))
+                None    => true
+                Some(e) => false
+
+    fn sync(self) -> Bool
+        true

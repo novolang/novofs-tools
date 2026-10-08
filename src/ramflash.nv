@@ -1,0 +1,220 @@
+// src/ramflash.nv — a flash device in the host's memory, for testing a
+// program that keeps a novofs volume.
+//
+// RamFlash implements novofs's `Flash` trait over a list of bytes.  It
+// keeps NOR flash's rules strictly: offsets and lengths are whole read
+// or prog units inside one block, a prog only clears bits (it ANDs its
+// bytes into the cells), and an erase sets a block to 0xFF.  A program
+// that gets the erase discipline wrong fails here, on the host, rather
+// than on a board.
+//
+// It also carries what a power-loss test needs: a per-block erase
+// count, a set of blocks that fail every prog and erase, and a power
+// cut scheduled after a number of operations, which may tear the
+// operation it cuts.
+//
+// The cells of every RamFlash live in one module-level list, each
+// device its own run of `block_size * block_count` cells.  The erase
+// counts, the failing blocks and the power-cut schedule are module
+// state too, and describe the most recently made RamFlash.  Two
+// RamFlash values with the same storage, such as one a test keeps and
+// one a volume owns, see each other's writes.
+
+use std.list
+
+use nvfs
+
+var ram_cells: [Int]  = []
+var ram_counts: [Int] = []
+var ram_bad: [Int]    = []
+var ram_nblocks       = 0
+var ram_last_h        = 0 - 1
+var ram_ops_left      = 0 - 1   // -1: no cut scheduled; 0: power is off
+var ram_tear          = 0 - 1
+var ram_op_count      = 0
+
+// A flash device in memory: `bc` blocks of `bs` bytes, read in units of
+// `rs` bytes and programmed in pages of `ps`, whose cells start at `h`
+// in the module's storage.  `ram_flash` makes one.
+pub struct RamFlash
+    h: Int
+    rs: Int
+    ps: Int
+    bs: Int
+    bc: Int
+
+// Releases the cells of the most recently made RamFlash, for a test
+// that makes thousands of devices in turn.  The device must not be used
+// afterwards: the next RamFlash reuses its cells.
+//
+// ```novo
+// fn main() [io, mutate]
+//     let dev = ramflash.ram_flash(16, 16, 512, 4)
+//     ramflash.ram_recycle()
+//     println("${ramflash.ram_flash(16, 16, 512, 4).block_count()}")   // 4
+// ```
+pub fn ram_recycle() [mutate]
+    if ram_last_h >= 0
+        ram_cells = list.take(ram_cells, ram_last_h)
+        ram_last_h = 0 - 1
+
+// A RamFlash of `block_count` blocks of `block_size` bytes, read in
+// units of `read_size` and programmed in pages of `prog_size`, every
+// byte erased to 0xFF.  It resets the erase counts, the failing blocks
+// and the power-cut schedule.
+//
+// ```novo
+// fn main() [io, mutate]
+//     let dev = ramflash.ram_flash(16, 16, 512, 32)
+//     println("${dev.block_size()} x ${dev.block_count()}")   // 512 x 32
+// ```
+pub fn ram_flash(read_size: Int, prog_size: Int, block_size: Int,
+                 block_count: Int) -> RamFlash [mutate]
+    ram_counts = list.zeros(block_count)
+    ram_bad = list.zeros(block_count)
+    ram_nblocks = block_count
+    ram_ops_left = 0 - 1
+    ram_tear = 0 - 1
+    ram_op_count = 0
+    // The new device's cells follow the others, erased.  The list is
+    // made again rather than extended: list.concat onto this
+    // module-level list leaks one list (novo-lang bug
+    // module-var-list-concat-leaks).
+    let h = list.len(ram_cells)
+    let before = ram_cells
+    ram_cells = list.map(list.range(0, h + block_size * block_count),
+                         i => (if i < h then before[i] else 255))
+    ram_last_h = h
+    RamFlash { h: h, rs: read_size, ps: prog_size, bs: block_size, bc: block_count }
+
+// Schedules a power cut: of the next progs and erases, `after_ops - 1`
+// succeed and the one after them is cut, and every one after the cut
+// fails until `ram_clear_cut`; with `after_ops` at 0 power is off at
+// once.  With `tear` below 0 the cut operation applies nothing; with
+// `tear` at 0 or above a prog applies its first `tear` bytes and an
+// erase erases the first half of its block.
+pub fn ram_schedule_cut(after_ops: Int, tear: Int) [mutate]
+    ram_ops_left = after_ops
+    ram_tear = tear
+
+// Restores power: no cut is scheduled and every operation runs.
+pub fn ram_clear_cut() [mutate]
+    ram_ops_left = 0 - 1
+    ram_tear = 0 - 1
+
+// The progs and erases that succeeded since the count was last reset
+// or the most recent RamFlash was made.
+pub fn ram_op_count_get() -> Int [mutate]
+    ram_op_count
+
+// Sets the count `ram_op_count_get` answers to 0.
+pub fn ram_op_count_reset() [mutate]
+    ram_op_count = 0
+
+// 0: proceed; 1: this operation is the cut; 2: power is off.
+fn ram_cut_gate() -> Int [mutate]
+    if ram_ops_left < 0
+        0
+    else if ram_ops_left == 0
+        2
+    else
+        ram_ops_left = ram_ops_left - 1
+        if ram_ops_left == 0
+            1
+        else
+            0
+
+// Marks block `b` of the most recent RamFlash as failing every prog and
+// erase from now on.
+pub fn ram_mark_bad(b: Int) [mutate]
+    if b >= 0 and b < ram_nblocks
+        ram_bad[b] = 1
+
+// Whether block `b` of the most recent RamFlash is marked failing.
+pub fn ram_is_bad(b: Int) -> Bool [mutate]
+    b >= 0 and b < ram_nblocks and ram_bad[b] == 1
+
+// The erases of block `b` that succeeded since the most recent RamFlash
+// was made.
+pub fn ram_erase_count(b: Int) -> Int [mutate]
+    if b >= 0 and b < ram_nblocks
+        ram_counts[b]
+    else
+        0
+
+impl Flash[mutate] for RamFlash
+    fn read_size(self) -> Int
+        self.rs
+
+    fn prog_size(self) -> Int
+        self.ps
+
+    fn block_size(self) -> Int
+        self.bs
+
+    fn block_count(self) -> Int
+        self.bc
+
+    fn read(self, block: Int, off: Int, len: Int, var dst: Buf) -> Bool [mutate]
+        dst.clear()
+        if block < 0 or block >= self.bc or off < 0 or len < 0 or len > BUF_CAP
+            false
+        else if off + len > self.bs or off % self.rs != 0 or len % self.rs != 0
+            false
+        else
+            let base = self.h + block * self.bs + off
+            for i in 0..len
+                let _ = dst.push(ram_cells[base + i] as u8)
+            true
+
+    fn prog(self, block: Int, off: Int, var data: Buf) -> Bool [mutate]
+        let len = data.len()
+        if block < 0 or block >= self.bc or off < 0
+            false
+        else if off + len > self.bs or off % self.ps != 0 or len % self.ps != 0
+            false
+        else if ram_is_bad(block)
+            false
+        else
+            let base = self.h + block * self.bs + off
+            let gate = ram_cut_gate()
+            if gate == 2
+                false
+            else if gate == 1
+                // A torn prog: only the first `ram_tear` bytes land.
+                var t = ram_tear
+                if t > len
+                    t = len
+                for it in 0..t
+                    ram_cells[base + it] = ram_cells[base + it] & data[it] as Int
+                false
+            else
+                for i in 0..len
+                    ram_cells[base + i] = ram_cells[base + i] & data[i] as Int
+                ram_op_count = ram_op_count + 1
+                true
+
+    fn erase(self, block: Int) -> Bool [mutate]
+        if block < 0 or block >= self.bc
+            false
+        else if ram_is_bad(block)
+            false
+        else
+            let base = self.h + block * self.bs
+            let gate = ram_cut_gate()
+            if gate == 2
+                false
+            else if gate == 1
+                // A torn erase: only the first half of the block erases.
+                for ih in 0..self.bs / 2
+                    ram_cells[base + ih] = 255
+                false
+            else
+                for i in 0..self.bs
+                    ram_cells[base + i] = 255
+                ram_counts[block] = ram_counts[block] + 1
+                ram_op_count = ram_op_count + 1
+                true
+
+    fn sync(self) -> Bool
+        true
