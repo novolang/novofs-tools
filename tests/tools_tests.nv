@@ -1,0 +1,464 @@
+// The host's flash devices and helpers: the RAM flash with power-cut injection, the whole-block adapter, the image-file device and whole files and listings over a volume.
+
+use std.test
+use std.bytes
+use std.list
+use std.fs
+
+use embedded_hal
+use nvfs
+use ramflash
+use blockflash
+use fileflash
+use hostfs
+
+fn want(got: FsError, exp: FsError)
+    test.assert_true(got == exp, "the status is the expected one")
+
+fn pattern(n: Int, seed: Int) -> Bytes
+    bytes.from_byte_list(list.map(list.range(0, n), i => (i * 7 + seed) % 251))
+
+fn buf_of(vals: [Int]) -> Buf
+    var b: Buf = Vec.new()
+    for v in vals
+        let _ = b.push(v as u8)
+    b
+
+fn full(n: Int, v: Int) -> Buf
+    buf_of(list.map(list.range(0, n), i => v))
+
+// ── ramflash ──
+
+@test
+fn test_a_ram_flash_reads_what_it_programs_and_erases_to_ff()
+    ramflash.ram_recycle()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    test.assert_eq(dev.read_size(), 16)
+    test.assert_eq(dev.prog_size(), 16)
+    test.assert_eq(dev.block_size(), 512)
+    test.assert_eq(dev.block_count(), 4)
+    var out: Buf = Vec.new()
+    test.assert_true(dev.read(1, 0, 16, var out), "read")
+    test.assert_eq(out.len(), 16)
+    test.assert_eq(out[3] as Int, 255)
+    var data = full(16, 0x5A)
+    test.assert_true(dev.prog(1, 32, var data), "prog")
+    test.assert_true(dev.read(1, 32, 16, var out), "read back")
+    test.assert_eq(out[0] as Int, 0x5A)
+    // a program only clears bits
+    var more = full(16, 0x0F)
+    test.assert_true(dev.prog(1, 32, var more), "prog again")
+    test.assert_true(dev.read(1, 32, 16, var out), "read back")
+    test.assert_eq(out[0] as Int, 0x0A)
+    test.assert_eq(ramflash.ram_op_count_get(), 2)
+    ramflash.ram_op_count_reset()
+    test.assert_eq(ramflash.ram_op_count_get(), 0)
+    test.assert_true(dev.erase(1), "erase")
+    test.assert_true(dev.read(1, 32, 16, var out), "read erased")
+    test.assert_eq(out[0] as Int, 255)
+    test.assert_eq(ramflash.ram_erase_count(1), 1)
+    test.assert_eq(ramflash.ram_erase_count(0 - 1), 0)
+    test.assert_eq(ramflash.ram_erase_count(9), 0)
+    test.assert_true(dev.sync(), "sync")
+
+@test
+fn test_a_ram_flash_refuses_what_its_geometry_forbids()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    var out: Buf = Vec.new()
+    test.assert_true(not dev.read(4, 0, 16, var out), "block past the end")
+    test.assert_true(not dev.read(0 - 1, 0, 16, var out), "negative block")
+    test.assert_true(not dev.read(0, 0 - 16, 16, var out), "negative offset")
+    test.assert_true(not dev.read(0, 0, 0 - 16, var out), "negative length")
+    test.assert_true(not dev.read(0, 0, 1024, var out), "longer than the buffer")
+    test.assert_true(not dev.read(0, 496, 32, var out), "past the block")
+    test.assert_true(not dev.read(0, 8, 16, var out), "misaligned offset")
+    test.assert_true(not dev.read(0, 0, 8, var out), "misaligned length")
+    var data = full(16, 0)
+    test.assert_true(not dev.prog(4, 0, var data), "block past the end")
+    test.assert_true(not dev.prog(0, 0 - 16, var data), "negative offset")
+    test.assert_true(dev.prog(0, 496, var data), "the last page programs")
+    test.assert_true(not dev.prog(0, 512, var data), "past the block")
+    test.assert_true(not dev.prog(0, 8, var data), "misaligned offset")
+    var odd = full(8, 0)
+    test.assert_true(not dev.prog(0, 0, var odd), "misaligned length")
+    test.assert_true(not dev.erase(4), "erase past the end")
+    test.assert_true(not dev.erase(0 - 1), "erase negative")
+
+@test
+fn test_a_bad_block_refuses_programs_and_erases()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    ramflash.ram_mark_bad(2)
+    ramflash.ram_mark_bad(0 - 1)
+    ramflash.ram_mark_bad(7)
+    test.assert_true(ramflash.ram_is_bad(2), "marked")
+    test.assert_true(not ramflash.ram_is_bad(1), "not marked")
+    test.assert_true(not ramflash.ram_is_bad(0 - 1), "negative")
+    test.assert_true(not ramflash.ram_is_bad(7), "past the end")
+    var data = full(16, 0)
+    test.assert_true(not dev.prog(2, 0, var data), "prog")
+    test.assert_true(not dev.erase(2), "erase")
+    test.assert_true(dev.erase(3), "another block erases")
+
+@test
+fn test_a_scheduled_power_cut_stops_programs_and_tears_the_last_one()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    // The second operation is cut, 4 bytes in.
+    ramflash.ram_schedule_cut(2, 4)
+    var data = full(16, 0)
+    test.assert_true(dev.prog(0, 0, var data), "the first operation completes")
+    test.assert_true(not dev.prog(0, 16, var data), "the second is cut")
+    var out: Buf = Vec.new()
+    test.assert_true(dev.read(0, 16, 16, var out), "read")
+    test.assert_eq(out[3] as Int, 0)
+    test.assert_eq(out[4] as Int, 255)
+    // Power is off: nothing more is done.
+    test.assert_true(not dev.prog(0, 32, var data), "off")
+    test.assert_true(not dev.erase(0), "off")
+    ramflash.ram_clear_cut()
+    test.assert_true(dev.erase(0), "power is back")
+    // A tear longer than the page tears the whole page.
+    ramflash.ram_schedule_cut(1, 100)
+    test.assert_true(not dev.prog(1, 0, var data), "cut")
+    test.assert_true(dev.read(1, 0, 16, var out), "read")
+    test.assert_eq(out[15] as Int, 0)
+    ramflash.ram_clear_cut()
+    // An erase that is cut erases half the block.
+    var ones = full(16, 0)
+    test.assert_true(dev.prog(2, 496, var ones), "prog")
+    test.assert_true(dev.prog(2, 0, var ones), "prog")
+    ramflash.ram_schedule_cut(1, 0)
+    test.assert_true(not dev.erase(2), "cut")
+    test.assert_true(dev.read(2, 0, 16, var out), "read")
+    test.assert_eq(out[0] as Int, 255)
+    test.assert_true(dev.read(2, 496, 16, var out), "read")
+    test.assert_eq(out[0] as Int, 0)
+    ramflash.ram_clear_cut()
+
+// ── blockflash ──
+
+var fbd_fail_read = false
+var fbd_fail_write = false
+var fbd_fail_erase = false
+
+// A RamBlock whose operations fail on demand.
+struct FailBlock
+    inner: RamBlock
+
+impl BlockDevice for FailBlock
+    fn block_size(self) -> Int [hw]
+        self.inner.block_size()
+
+    fn block_count(self) -> Int [hw]
+        self.inner.block_count()
+
+    fn read_block(self, block: Int, var dst: Vec[u8; 512]) -> Bool [hw, mutate]
+        if fbd_fail_read
+            dst.clear()
+            false
+        else
+            self.inner.read_block(block, var dst)
+
+    fn write_block(self, block: Int, var src: Vec[u8; 512]) -> Bool [hw, mutate]
+        if fbd_fail_write
+            false
+        else
+            self.inner.write_block(block, var src)
+
+    fn erase_block(self, block: Int) -> Bool [hw, mutate]
+        if fbd_fail_erase
+            false
+        else
+            self.inner.erase_block(block)
+
+@test
+fn test_a_ram_block_device_reads_writes_and_erases_whole_blocks()
+    let rb = blockflash.ram_block(512, 4)
+    test.assert_eq(rb.block_size(), 512)
+    test.assert_eq(rb.block_count(), 4)
+    var blk: Vec[u8; 512] = Vec.new()
+    test.assert_true(rb.read_block(1, var blk), "read")
+    test.assert_eq(blk.len(), 512)
+    test.assert_eq(blk[100] as Int, 255)
+    blk[100] = 7 as u8
+    test.assert_true(rb.write_block(1, var blk), "write")
+    var back: Vec[u8; 512] = Vec.new()
+    test.assert_true(rb.read_block(1, var back), "read back")
+    test.assert_eq(back[100] as Int, 7)
+    test.assert_true(rb.erase_block(1), "erase")
+    test.assert_true(rb.read_block(1, var back), "read erased")
+    test.assert_eq(back[100] as Int, 255)
+    test.assert_true(not rb.read_block(4, var back), "read past the end")
+    test.assert_true(not rb.read_block(0 - 1, var back), "read negative")
+    test.assert_true(not rb.write_block(4, var blk), "write past the end")
+    test.assert_true(not rb.write_block(0 - 1, var blk), "write negative")
+    var short: Vec[u8; 512] = Vec.new()
+    test.assert_true(not rb.write_block(0, var short), "write of the wrong length")
+    test.assert_true(not rb.erase_block(4), "erase past the end")
+    test.assert_true(not rb.erase_block(0 - 1), "erase negative")
+    let big = blockflash.ram_block(1024, 2)
+    test.assert_true(not big.read_block(0, var back), "a block longer than the buffer")
+
+@test
+fn test_a_block_device_serves_as_a_flash_device()
+    let bf = blockflash.block_flash(blockflash.ram_block(512, 4))
+    test.assert_eq(bf.read_size(), 16)
+    test.assert_eq(bf.prog_size(), 16)
+    test.assert_eq(bf.block_size(), 512)
+    test.assert_eq(bf.block_count(), 4)
+    test.assert_true(bf.sync(), "sync")
+    var data = full(32, 0x3C)
+    test.assert_true(bf.prog(2, 64, var data), "prog")
+    var out: Buf = Vec.new()
+    test.assert_true(bf.read(2, 64, 32, var out), "read")
+    test.assert_eq(out.len(), 32)
+    test.assert_eq(out[31] as Int, 0x3C)
+    var more = full(16, 0xF0)
+    test.assert_true(bf.prog(2, 64, var more), "program only clears bits")
+    test.assert_true(bf.read(2, 64, 16, var out), "read")
+    test.assert_eq(out[0] as Int, 0x30)
+    test.assert_true(bf.read(2, 80, 16, var out), "the neighbour page is untouched")
+    test.assert_eq(out[0] as Int, 0x3C)
+    test.assert_true(bf.erase(2), "erase")
+    test.assert_true(bf.read(2, 64, 16, var out), "read erased")
+    test.assert_eq(out[0] as Int, 255)
+    test.assert_true(not bf.read(2, 8, 16, var out), "misaligned offset")
+    test.assert_true(not bf.read(2, 0, 8, var out), "misaligned length")
+    test.assert_true(not bf.read(2, 0 - 16, 16, var out), "negative offset")
+    test.assert_true(not bf.read(2, 0, 0 - 16, var out), "negative length")
+    test.assert_true(not bf.read(2, 0, 1024, var out), "longer than the buffer")
+    test.assert_true(not bf.read(2, 496, 32, var out), "past the block")
+    test.assert_true(not bf.read(9, 0, 16, var out), "block past the end")
+    test.assert_true(not bf.prog(2, 8, var more), "misaligned offset")
+    var odd = full(8, 0)
+    test.assert_true(not bf.prog(2, 0, var odd), "misaligned length")
+    test.assert_true(not bf.prog(2, 0 - 16, var more), "negative offset")
+    test.assert_true(not bf.prog(2, 512, var more), "past the block")
+    test.assert_true(not bf.prog(9, 0, var more), "block past the end")
+
+@test
+fn test_a_volume_runs_on_a_block_device()
+    let bf = blockflash.block_flash(blockflash.ram_block(512, 16))
+    want(nvfs.format(bf, nvfs.default_config()), EOk)
+    let vol = nvfs.mount(bf)
+    want(vol.status(), EOk)
+    want(hostfs.file_write(vol, "/f", pattern(300, 1)), EOk)
+    match hostfs.file_read(vol, "/f")
+        FOk(d)  => test.assert_true(d == pattern(300, 1), "the file reads back")
+        FErr(e) => test.assert_true(false, "the file reads back")
+
+@test
+fn test_a_block_device_that_fails_fails_the_flash_device()
+    let bf = blockflash.block_flash(FailBlock { inner: blockflash.ram_block(512, 4) })
+    var data = full(16, 0)
+    var out: Buf = Vec.new()
+    fbd_fail_read = true
+    test.assert_true(not bf.read(0, 0, 16, var out), "read")
+    test.assert_true(not bf.prog(0, 0, var data), "prog reads the block first")
+    fbd_fail_read = false
+    fbd_fail_erase = true
+    test.assert_true(not bf.prog(0, 0, var data), "prog erases the block")
+    test.assert_true(not bf.erase(0), "erase")
+    fbd_fail_erase = false
+    fbd_fail_write = true
+    test.assert_true(not bf.prog(0, 0, var data), "prog writes the block")
+    fbd_fail_write = false
+    test.assert_true(bf.prog(0, 0, var data), "and works again")
+
+// ── fileflash ──
+
+fn img_path(n: Int) -> Str
+    "/tmp/novofs-tools-test-${n}.img"
+
+@test
+fn test_an_image_file_is_erased_programmed_and_read_in_place()
+    let p = img_path(1)
+    let _ = fs.delete(p)
+    match fileflash.file_flash(p, 16, 16, 512, 4)
+        None      => test.assert_true(false, "the image opens")
+        Some(dev) =>
+            test.assert_eq(dev.read_size(), 16)
+            test.assert_eq(dev.prog_size(), 16)
+            test.assert_eq(dev.block_size(), 512)
+            test.assert_eq(dev.block_count(), 4)
+            test.assert_true(dev.sync(), "sync")
+            var out: Buf = Vec.new()
+            test.assert_true(dev.read(3, 496, 16, var out), "read")
+            test.assert_eq(out[0] as Int, 255)
+            var data = full(16, 0x21)
+            test.assert_true(dev.prog(3, 496, var data), "prog")
+            test.assert_true(dev.read(3, 496, 16, var out), "read back")
+            test.assert_eq(out[15] as Int, 0x21)
+            test.assert_true(dev.erase(3), "erase")
+            test.assert_true(dev.read(3, 496, 16, var out), "read erased")
+            test.assert_eq(out[0] as Int, 255)
+            test.assert_true(not dev.read(4, 0, 16, var out), "block past the end")
+            test.assert_true(not dev.read(0 - 1, 0, 16, var out), "negative block")
+            test.assert_true(not dev.read(0, 0 - 16, 16, var out), "negative offset")
+            test.assert_true(not dev.read(0, 0, 0 - 16, var out), "negative length")
+            test.assert_true(not dev.read(0, 0, 1024, var out), "longer than the buffer")
+            test.assert_true(not dev.read(0, 496, 32, var out), "past the block")
+            test.assert_true(not dev.read(0, 8, 16, var out), "misaligned offset")
+            test.assert_true(not dev.read(0, 0, 8, var out), "misaligned length")
+            test.assert_true(not dev.prog(4, 0, var data), "prog block past the end")
+            test.assert_true(not dev.prog(0 - 1, 0, var data), "prog negative block")
+            test.assert_true(not dev.prog(0, 0 - 16, var data), "prog negative offset")
+            var two = full(32, 1)
+            test.assert_true(not dev.prog(0, 496, var two), "prog past the block")
+            test.assert_true(not dev.prog(0, 8, var data), "prog misaligned offset")
+            var odd = full(8, 0)
+            test.assert_true(not dev.prog(0, 0, var odd), "prog misaligned length")
+            test.assert_true(not dev.erase(4), "erase past the end")
+            test.assert_true(not dev.erase(0 - 1), "erase negative")
+    // The file is kept: a second open reads what the first left.
+    match fileflash.file_flash(p, 16, 16, 512, 4)
+        None      => test.assert_true(false, "the image opens again")
+        Some(dev) =>
+            var data = full(16, 0x44)
+            test.assert_true(dev.prog(1, 0, var data), "prog")
+    match fileflash.file_flash(p, 16, 16, 512, 4)
+        None      => test.assert_true(false, "the image opens a third time")
+        Some(dev) =>
+            var out: Buf = Vec.new()
+            test.assert_true(dev.read(1, 0, 16, var out), "read")
+            test.assert_eq(out[0] as Int, 0x44)
+    let _ = fs.delete(p)
+
+@test
+fn test_a_volume_runs_on_an_image_file()
+    let p = img_path(2)
+    let _ = fs.delete(p)
+    match fileflash.file_flash(p, 16, 16, 512, 16)
+        None      => test.assert_true(false, "the image opens")
+        Some(dev) =>
+            want(nvfs.format(dev, nvfs.default_config()), EOk)
+            let vol = nvfs.mount(dev)
+            want(hostfs.file_write(vol, "/f", pattern(700, 3)), EOk)
+            let back = nvfs.mount(vol.unmount())
+            match hostfs.file_read(back, "/f")
+                FOk(d)  => test.assert_true(d == pattern(700, 3), "the file reads back")
+                FErr(e) => test.assert_true(false, "the file reads back")
+    let _ = fs.delete(p)
+
+@test
+fn test_an_image_that_cannot_be_opened_or_erased_is_none()
+    test.assert_true(fileflash.file_flash("/nonexistent-dir/x.img", 16, 16, 512, 4) == None, "no such directory")
+    // A file that opens for writing but takes no write of this size.
+    test.assert_true(fileflash.file_flash("/proc/self/oom_score_adj", 16, 16, 512, 4) == None, "a file that refuses writes")
+
+// ── hostfs ──
+
+@test
+fn test_whole_files_and_listings_over_a_volume()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 32)
+    want(nvfs.format(dev, nvfs.default_config()), EOk)
+    let vol = nvfs.mount(dev)
+    test.assert_eq(hostfs.src(pattern(5, 1)).src_len(), 5)
+    test.assert_eq(hostfs.src(pattern(5, 1)).src_at(2), 15)
+    want(hostfs.file_write(vol, "/a", pattern(10, 1)), EOk)
+    want(hostfs.file_write(vol, "/big", pattern(1300, 2)), EOk)
+    want(vol.mkdir("/d"), EOk)
+    want(hostfs.file_append(vol, "/d/log", pattern(3, 4)), EOk)
+    want(hostfs.file_append(vol, "/d/log", pattern(4, 5)), EOk)
+    match hostfs.file_read(vol, "/big")
+        FOk(d)  => test.assert_true(d == pattern(1300, 2), "a file of several chunks reads back")
+        FErr(e) => test.assert_true(false, "the big file reads")
+    match hostfs.file_read(vol, "/d/log")
+        FOk(d)  => test.assert_eq(bytes.len(d), 7)
+        FErr(e) => test.assert_true(false, "the log reads")
+    match hostfs.file_read_at(vol, "/big", 600, 200)
+        FOk(d)  => test.assert_true(d == bytes.slice(pattern(1300, 2), 600, 800), "a range reads")
+        FErr(e) => test.assert_true(false, "the range reads")
+    match hostfs.file_read_at(vol, "/big", 1200, 200)
+        FOk(d)  => test.assert_true(false, "a range past the end")
+        FErr(e) => want(e, EInvalidConfig)
+    match hostfs.file_read_at(vol, "/big", 0 - 1, 2)
+        FOk(d)  => test.assert_true(false, "a negative offset")
+        FErr(e) => want(e, EInvalidConfig)
+    match hostfs.file_read_at(vol, "/big", 0, 0 - 2)
+        FOk(d)  => test.assert_true(false, "a negative length")
+        FErr(e) => want(e, EInvalidConfig)
+    match hostfs.file_read(vol, "/d")
+        FOk(d)  => test.assert_true(false, "a directory")
+        FErr(e) => want(e, EIsDir)
+    match hostfs.file_read_at(vol, "/d", 0, 0)
+        FOk(d)  => test.assert_true(false, "a directory")
+        FErr(e) => want(e, EIsDir)
+    match hostfs.file_read(vol, "/missing")
+        FOk(d)  => test.assert_true(false, "a missing file")
+        FErr(e) => test.assert_true(e != EOk, "a missing file")
+    match hostfs.dir_list(vol, "/")
+        DLOk(es) =>
+            test.assert_eq(list.len(es), 3)
+            var dirs = 0
+            for en in es
+                if en.is_dir
+                    dirs = dirs + 1
+                    test.assert_eq(en.name, "d")
+            test.assert_eq(dirs, 1)
+        DLErr(e) => test.assert_true(false, "the root lists")
+    match hostfs.dir_list(vol, "/missing")
+        DLOk(es) => test.assert_true(false, "a missing directory")
+        DLErr(e) => test.assert_true(e != EOk, "a missing directory")
+
+@test
+fn test_a_device_read_and_program_helper_reaches_any_device()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    test.assert_true(hostfs.prog_bytes(dev, 1, 16, pattern(16, 9)), "prog")
+    match hostfs.read_bytes(dev, 1, 16, 16)
+        Some(b) => test.assert_true(b == pattern(16, 9), "read back")
+        None    => test.assert_true(false, "read back")
+    test.assert_true(hostfs.read_bytes(dev, 1, 8, 16) == None, "a misaligned read")
+
+// A flash whose reads fail once `ff_left` of them have succeeded.
+var ff_left = 0 - 1
+
+struct FaultFlash
+    inner: RamFlash
+
+impl Flash[mutate] for FaultFlash
+    fn read_size(self) -> Int
+        self.inner.read_size()
+    fn prog_size(self) -> Int
+        self.inner.prog_size()
+    fn block_size(self) -> Int
+        self.inner.block_size()
+    fn block_count(self) -> Int
+        self.inner.block_count()
+    fn read(self, block: Int, off: Int, len: Int, var dst: Buf) -> Bool [mutate]
+        if ff_left == 0
+            dst.clear()
+            false
+        else
+            if ff_left > 0
+                ff_left = ff_left - 1
+            self.inner.read(block, off, len, var dst)
+    fn prog(self, block: Int, off: Int, var data: Buf) -> Bool [mutate]
+        self.inner.prog(block, off, var data)
+    fn erase(self, block: Int) -> Bool [mutate]
+        self.inner.erase(block)
+    fn sync(self) -> Bool
+        true
+
+@test
+fn test_a_read_that_fails_part_way_through_a_file_is_reported()
+    ramflash.ram_recycle()
+    let dev = ramflash.ram_flash(16, 16, 512, 32)
+    want(nvfs.format(dev, nvfs.default_config()), EOk)
+    let w = nvfs.mount(dev)
+    want(hostfs.file_write(w, "/big", pattern(1300, 2)), EOk)
+    let _ = w.unmount()
+    var failed = 0
+    for k in 0..80
+        let vol = nvfs.mount(FaultFlash { inner: dev })
+        ff_left = k
+        match hostfs.file_read(vol, "/big")
+            FOk(d)  => ()
+            FErr(e) => failed = failed + 1
+        ff_left = 0 - 1
+    test.assert_true(failed > 0, "some read failed")
