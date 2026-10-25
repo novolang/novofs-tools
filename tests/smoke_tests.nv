@@ -1,0 +1,7 @@
+use std.test
+use ramflash
+
+@test
+fn test_a_ram_flash_has_the_geometry_it_was_made_with()
+    let dev = ramflash.ram_flash(16, 16, 512, 4)
+    test.assert_eq(dev.block_count(), 4)

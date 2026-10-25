@@ -56,12 +56,12 @@ pub enum FileRes
 // The entries of the directory `path`, in the order the directory holds
 // them, or why it cannot be listed.
 pub fn dir_list<F: FileSystem[e]>(fsys: F, path: Str) -> DirListRes [e]
-    var at = fsys.list(path)
+    var at: Listing = fsys.list(path)
     if at.err != EOk
         return DLErr(at.err)
     var es: [DirEntry] = []
     while true
-        match fsys.list_next(at)
+        match fsys.list_next(var at)
             Some(en) =>
                 es = list.push(es, DirEntry { name: en.name_str(), is_dir: en.is_dir,
                                               size: en.size })
@@ -86,7 +86,7 @@ pub fn file_read_at<F: FileSystem[e]>(fsys: F, path: Str, off: Int, len: Int) ->
                 var n = len - at
                 if n > BUF_CAP
                     n = BUF_CAP
-                let r = fsys.file_read_at(path, off + at, n, buf)
+                let r = fsys.file_read_at(path, off + at, n, var buf)
                 if r != EOk
                     return FErr(r)
                 for k in 0..n
@@ -113,13 +113,13 @@ pub fn prog_bytes<D: Flash[e]>(dev: D, block: Int, off: Int, data: Bytes) -> Boo
     var buf: Buf = Vec.new()
     for i in 0..bytes.len(data)
         let _ = buf.push((bytes.byte_at(data, i) ?? 0) as u8)
-    dev.prog(block, off, buf)
+    dev.prog(block, off, var buf)
 
 // The `len` bytes at (block, off) of any device, or None when the device
 // refuses the read.
 pub fn read_bytes<D: Flash[e]>(dev: D, block: Int, off: Int, len: Int) -> ?Bytes [e]
     var buf: Buf = Vec.new()
-    if not dev.read(block, off, len, buf)
+    if not dev.read(block, off, len, var buf)
         return None
     var out = bytes.zeros(buf.len())
     for i in 0..buf.len()

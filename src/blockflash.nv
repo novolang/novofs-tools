@@ -120,7 +120,7 @@ impl Flash[hw, mutate] for BlockFlash
             false
         else
             var cur: Vec[u8; 512] = Vec.new()
-            if not bd.read_block(blk, cur)
+            if not bd.read_block(blk, var cur)
                 return false
             for i in off..off + len
                 let _ = dst.push(cur[i])
@@ -134,13 +134,13 @@ impl Flash[hw, mutate] for BlockFlash
             false
         else
             var img: Vec[u8; 512] = Vec.new()
-            if not bd.read_block(blk, img)
+            if not bd.read_block(blk, var img)
                 return false
             // NOR rules: the incoming bits are ANDed into the image.
             for i in off..off + len
                 img[i] = (img[i] as Int & data[i - off] as Int) as u8
             if bd.erase_block(blk)
-                bd.write_block(blk, img)
+                bd.write_block(blk, var img)
             else
                 false
 
