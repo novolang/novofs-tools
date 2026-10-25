@@ -349,6 +349,24 @@ fn test_an_image_that_cannot_be_opened_or_erased_is_none()
     // A file that opens for writing but takes no write of this size.
     test.assert_true(fileflash.file_flash("/proc/self/oom_score_adj", 16, 16, 512, 4) == None, "a file that refuses writes")
 
+@test
+fn test_an_image_that_cannot_be_read_or_programmed_fails_the_device()
+    var out: Buf = Vec.new()
+    var data = full(16, 0)
+    // /dev/null takes every write and has nothing to read back.
+    match fileflash.file_flash("/dev/null", 16, 16, 512, 4)
+        None      => test.assert_true(false, "/dev/null opens")
+        Some(dev) =>
+            test.assert_true(not dev.read(0, 0, 16, var out), "nothing to read")
+            test.assert_true(dev.prog(0, 0, var data), "a write is taken")
+    // /dev/full reads zeros and takes no write.
+    match fileflash.file_flash("/dev/full", 16, 16, 512, 4)
+        None      => test.assert_true(false, "/dev/full opens")
+        Some(dev) =>
+            test.assert_true(dev.read(0, 0, 16, var out), "zeros to read")
+            test.assert_true(not dev.prog(0, 0, var data), "no write is taken")
+            test.assert_true(not dev.erase(0), "no erase is taken")
+
 // ── hostfs ──
 
 @test
@@ -388,6 +406,9 @@ fn test_whole_files_and_listings_over_a_volume()
     match hostfs.file_read_at(vol, "/d", 0, 0)
         FOk(d)  => test.assert_true(false, "a directory")
         FErr(e) => want(e, EIsDir)
+    match hostfs.file_read_at(vol, "/missing", 0, 0)
+        FOk(d)  => test.assert_true(false, "a missing file")
+        FErr(e) => test.assert_true(e != EOk, "a missing file")
     match hostfs.file_read(vol, "/missing")
         FOk(d)  => test.assert_true(false, "a missing file")
         FErr(e) => test.assert_true(e != EOk, "a missing file")
