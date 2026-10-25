@@ -1,0 +1,152 @@
+// src/blockflash.nv — a whole-block device as a novofs flash device.
+//
+// embedded-hal-nv's `BlockDevice` moves whole blocks: `read_block`,
+// `write_block` and `erase_block`, each through a `Vec[u8; 512]` the
+// caller owns, so a block is at most 512 bytes.  novofs programs a
+// page at a time, so BlockFlash reports a 16-byte page and implements a
+// prog as a read-modify-write that keeps NOR rules: it reads the block,
+// ANDs the new bytes into it at the offset, erases the block and writes
+// it back.  A prog therefore costs one erase, and a volume on such a
+// device wears with the number of writes rather than their size.  A
+// flash part should implement `Flash` itself; this adapter is for
+// SD-card and RAM-class whole-block devices.
+//
+// The page is small because novofs lays a block's records out from
+// max(4, prog size): a page as large as the block would leave no room
+// for a record.
+//
+// RamBlock is a `BlockDevice` in the host's memory, for testing.
+
+use std.list
+
+use embedded_hal
+use nvfs
+
+// The prog page BlockFlash reports.
+let BD_PAGE = 16
+
+var bd_cells: [Int] = []
+
+// A whole-block device in the host's memory: `bc` blocks of `bs`
+// bytes, whose cells start at `h` in the module's storage.  `ram_block`
+// makes one.
+pub struct RamBlock
+    h: Int
+    bs: Int
+    bc: Int
+
+// A RamBlock of `block_count` blocks of `block_size` bytes, every byte
+// erased to 0xFF.  A block is at most 512 bytes: a larger one is refused
+// by every read.
+//
+// ```novo
+// fn main() [io, hw, mutate]
+//     let bd = blockflash.ram_block(512, 8)
+//     println("${blockflash.block_flash(bd).block_count()}")   // 8
+// ```
+pub fn ram_block(block_size: Int, block_count: Int) -> RamBlock [mutate]
+    // The new device's cells follow the others, erased.  The list is
+    // made again rather than extended: list.concat onto this
+    // module-level list leaks one list (novo-lang bug
+    // module-var-list-concat-leaks).
+    let h = list.len(bd_cells)
+    let before = bd_cells
+    bd_cells = list.map(list.range(0, h + block_size * block_count),
+                        i => (if i < h then before[i] else 255))
+    RamBlock { h: h, bs: block_size, bc: block_count }
+
+impl BlockDevice for RamBlock
+    fn block_size(self) -> Int [hw]
+        self.bs
+
+    fn block_count(self) -> Int [hw]
+        self.bc
+
+    fn read_block(self, block: Int, var dst: Vec[u8; 512]) -> Bool [hw, mutate]
+        dst.clear()
+        if block < 0 or block >= self.bc or self.bs > 512
+            false
+        else
+            for i in 0..self.bs
+                let _ = dst.push(bd_cells[self.h + block * self.bs + i] as u8)
+            true
+
+    fn write_block(self, block: Int, var src: Vec[u8; 512]) -> Bool [hw, mutate]
+        if block < 0 or block >= self.bc or src.len() != self.bs
+            false
+        else
+            for i in 0..self.bs
+                bd_cells[self.h + block * self.bs + i] = src[i] as Int
+            true
+
+    fn erase_block(self, block: Int) -> Bool [hw, mutate]
+        if block < 0 or block >= self.bc
+            false
+        else
+            for i in 0..self.bs
+                bd_cells[self.h + block * self.bs + i] = 255
+            true
+
+// Any `BlockDevice` as a flash device, with a 16-byte page for reads and
+// progs.  `block_flash` makes one.
+pub struct BlockFlash
+    bd: dyn BlockDevice
+
+// The block device `bd` as a flash device.  Each prog reads its block,
+// ANDs the new bytes into it, erases the block and writes it back.
+pub fn block_flash(bd: dyn BlockDevice) -> BlockFlash
+    BlockFlash { bd: bd }
+
+impl Flash[hw, mutate] for BlockFlash
+    fn read_size(self) -> Int
+        BD_PAGE
+
+    fn prog_size(self) -> Int
+        BD_PAGE
+
+    fn block_size(self) -> Int [hw, mutate]
+        let bd = self.bd
+        bd.block_size()
+
+    fn block_count(self) -> Int [hw, mutate]
+        let bd = self.bd
+        bd.block_count()
+
+    fn read(self, blk: Int, off: Int, len: Int, var dst: Buf) -> Bool [hw, mutate]
+        dst.clear()
+        let bd = self.bd
+        let bs = bd.block_size()
+        if off < 0 or len < 0 or len > BUF_CAP or off + len > bs or off % BD_PAGE != 0 or len % BD_PAGE != 0
+            false
+        else
+            var cur: Vec[u8; 512] = Vec.new()
+            if not bd.read_block(blk, cur)
+                return false
+            for i in off..off + len
+                let _ = dst.push(cur[i])
+            true
+
+    fn prog(self, blk: Int, off: Int, var data: Buf) -> Bool [hw, mutate]
+        let bd = self.bd
+        let bs = bd.block_size()
+        let len = data.len()
+        if off < 0 or off + len > bs or off % BD_PAGE != 0 or len % BD_PAGE != 0
+            false
+        else
+            var img: Vec[u8; 512] = Vec.new()
+            if not bd.read_block(blk, img)
+                return false
+            // NOR rules: the incoming bits are ANDed into the image.
+            for i in off..off + len
+                img[i] = (img[i] as Int & data[i - off] as Int) as u8
+            if bd.erase_block(blk)
+                bd.write_block(blk, img)
+            else
+                false
+
+    fn erase(self, blk: Int) -> Bool [hw, mutate]
+        let bd = self.bd
+        bd.erase_block(blk)
+
+    fn sync(self) -> Bool
+        true
