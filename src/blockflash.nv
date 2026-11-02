@@ -19,9 +19,6 @@
 
 use std.list
 
-use embedded_hal
-use nvfs
-
 // The prog page BlockFlash reports.
 let BD_PAGE = 16
 

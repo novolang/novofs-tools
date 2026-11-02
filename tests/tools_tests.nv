@@ -5,7 +5,6 @@ use std.bytes
 use std.list
 use std.fs
 
-use embedded_hal
 use nvfs
 use ramflash
 use blockflash
@@ -140,7 +139,7 @@ fn test_a_scheduled_power_cut_stops_programs_and_tears_the_last_one()
 
 // ── blockflash ──
 
-var fbd_fail_read = false
+var fbd_fail_read  = false
 var fbd_fail_write = false
 var fbd_fail_erase = false
 
@@ -347,7 +346,8 @@ fn test_a_volume_runs_on_an_image_file()
 fn test_an_image_that_cannot_be_opened_or_erased_is_none()
     test.assert_true(fileflash.file_flash("/nonexistent-dir/x.img", 16, 16, 512, 4) == None, "no such directory")
     // A file that opens for writing but takes no write of this size.
-    test.assert_true(fileflash.file_flash("/proc/self/oom_score_adj", 16, 16, 512, 4) == None, "a file that refuses writes")
+    test.assert_true(fileflash.file_flash("/proc/self/oom_score_adj", 16, 16, 512, 4) == None,
+        "a file that refuses writes")
 
 @test
 fn test_an_image_that_cannot_be_read_or_programmed_fails_the_device()
@@ -445,12 +445,16 @@ struct FaultFlash
 impl Flash[mutate] for FaultFlash
     fn read_size(self) -> Int
         self.inner.read_size()
+
     fn prog_size(self) -> Int
         self.inner.prog_size()
+
     fn block_size(self) -> Int
         self.inner.block_size()
+
     fn block_count(self) -> Int
         self.inner.block_count()
+
     fn read(self, block: Int, off: Int, len: Int, var dst: Buf) -> Bool [mutate]
         if ff_left == 0
             dst.clear()
@@ -459,10 +463,13 @@ impl Flash[mutate] for FaultFlash
             if ff_left > 0
                 ff_left = ff_left - 1
             self.inner.read(block, off, len, var dst)
+
     fn prog(self, block: Int, off: Int, var data: Buf) -> Bool [mutate]
         self.inner.prog(block, off, var data)
+
     fn erase(self, block: Int) -> Bool [mutate]
         self.inner.erase(block)
+
     fn sync(self) -> Bool
         true
 
@@ -480,6 +487,7 @@ fn test_a_read_that_fails_part_way_through_a_file_is_reported()
         ff_left = k
         match hostfs.file_read(vol, "/big")
             FOk(d)  => ()
-            FErr(e) => failed = failed + 1
+            FErr(e) =>
+                failed = failed + 1
         ff_left = 0 - 1
     test.assert_true(failed > 0, "some read failed")

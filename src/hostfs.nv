@@ -11,8 +11,6 @@
 use std.bytes
 use std.list
 
-use nvfs
-
 // A `Bytes` as the bytes a file write takes.  `src` makes one.
 pub struct BytesSrc
     b: Bytes

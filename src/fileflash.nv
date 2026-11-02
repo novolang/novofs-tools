@@ -16,8 +16,6 @@ use std.bytes
 use std.fs
 use std.list
 
-use nvfs
-
 // A volume image in a file: `bc` blocks of `bs` bytes, read in units of
 // `rs` bytes and programmed in pages of `ps`, through the file's read
 // and write descriptors.  `file_flash` makes one.

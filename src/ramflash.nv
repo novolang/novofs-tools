@@ -22,8 +22,6 @@
 
 use std.list
 
-use nvfs
-
 var ram_cells: [Int]  = []
 var ram_counts: [Int] = []
 var ram_bad: [Int]    = []
