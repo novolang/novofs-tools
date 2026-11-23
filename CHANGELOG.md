@@ -5,6 +5,14 @@ All notable changes to novofs-tools are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.3 — 2026-11-23
+
+The package asks for embedded-hal-nv ^0.4.0 (was ^0.3.2), the minor of both trait packages that the other drivers and the board packages ask for, so one version of each serves a program that takes this package beside any of them.  Under the older ranges, a program that named this package and a driver on 0.4 stopped with "no version of 'embedded-hal-nv' satisfies every requirement".
+
+No signature of the package changed; the suite passes without an edit.
+
+The package has no device program; its suite is the check.
+
 ## 0.1.2 — 2026-11-03
 
 This release requires novo 0.23.0 or later.
