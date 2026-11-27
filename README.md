@@ -70,12 +70,12 @@ use ramflash
 fn main() [io, mutate]
     // 32 blocks of 512 bytes, read and programmed in 16-byte pages
     let dev = ramflash.ram_flash(16, 16, 512, 32)
-    let _ = nvfs.format(dev, nvfs.default_config())
+    nvfs.format(dev, nvfs.default_config())
     let vol = nvfs.mount(dev)
-    let _ = hostfs.file_write(vol, "/log", bytes.from_str("one"))
+    hostfs.file_write(vol, "/log", bytes.from_str("one"))
     // The third prog or erase from here is cut, half applied.
     ramflash.ram_schedule_cut(3, 8)
-    let _ = hostfs.file_write(vol, "/log", bytes.from_str("two"))
+    hostfs.file_write(vol, "/log", bytes.from_str("two"))
     ramflash.ram_clear_cut()
     // Power back: the volume holds the file as it was or as it is now.
     let again = nvfs.mount(vol.unmount())

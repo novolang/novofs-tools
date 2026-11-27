@@ -1,6 +1,6 @@
 [package]
 name        = "novofs-tools"
-version     = "0.1.3"
+version     = "0.1.4"
 description = "The host's tools for novofs volumes: an image tool that builds, lists, reads, checks and unpacks volume images (mk, ls, cat, fsck, df, extract), a RAM flash device with power-cut injection for testing, an image-file device, an adapter from embedded-hal-nv's BlockDevice, and whole files and listings over any novofs FileSystem."
 license     = "Apache-2.0"
 category    = "embedded"

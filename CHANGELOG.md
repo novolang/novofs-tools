@@ -5,6 +5,10 @@ All notable changes to novofs-tools are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.4 — 2026-11-27
+
+The README program for the power-cut test calls `nvfs.format` and `hostfs.file_write` without a binding.  No signature of the package changed.
+
 ## 0.1.3 — 2026-11-23
 
 The package asks for embedded-hal-nv ^0.4.0 (was ^0.3.2), the minor of both trait packages that the other drivers and the board packages ask for, so one version of each serves a program that takes this package beside any of them.  Under the older ranges, a program that named this package and a driver on 0.4 stopped with "no version of 'embedded-hal-nv' satisfies every requirement".
