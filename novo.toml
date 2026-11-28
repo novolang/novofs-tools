@@ -5,6 +5,11 @@ description = "The host's tools for novofs volumes: an image tool that builds, l
 license     = "Apache-2.0"
 category    = "embedded"
 layer       = "app"
+
+# The package is the host's tools for novofs volumes: it reads and writes
+# files and image files of the host.
+host_only   = true
+
 stability   = "experimental"
 tags        = ["embedded", "filesystem", "flash", "littlefs", "image", "testing"]
 repository  = "https://github.com/novolang/novofs-tools"
